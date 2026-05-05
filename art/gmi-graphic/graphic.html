@@ -1,0 +1,390 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Dipole — GMI Cloud hero graphic</title>
+<style>
+  html, body {
+    margin: 0; padding: 0;
+    background: #000;
+    overflow: hidden;
+    width: 100%; height: 100%;
+  }
+  canvas {
+    display: block;
+    width: 100vw; height: 100vh;
+    background: #000;
+  }
+</style>
+</head>
+<body>
+<canvas id="c"></canvas>
+<script>
+// ─────────────────────────────────────────────────────────────────────────────
+// DIPOLE
+// A two-pole vector field. One pole is the source (lime, bright), the other
+// is the sink (white, dim). Streamlines are integrated once at startup along
+// the field — they are the dedicated topology. Energy beads ride those lines
+// continuously (the elastic throughput). Every ~5s a synchronized wavefront
+// is emitted from the source — every streamline gets a brighter pulse at the
+// same instant; arrivals at the sink are spread because the lines have
+// different lengths. The result is a calmly breathing, physically-grounded
+// portrait of two opposite things bound into one coherent system.
+// Pure vanilla canvas. DPR-aware. Reduced-motion aware. Tab-pause.
+// ─────────────────────────────────────────────────────────────────────────────
+(function () {
+  const canvas = document.getElementById('c');
+  const ctx = canvas.getContext('2d');
+
+  const LIME = [212, 245, 65];
+  const INK  = [255, 255, 255];
+  function rgba(c, a) { return `rgba(${c[0]},${c[1]},${c[2]},${a})`; }
+
+  let W = 0, H = 0, DPR = 1;
+  let poleA, poleB;          // source, sink
+  let streamlines = [];      // each: {points: [{x,y,len}], totalLen, segLens}
+  let beads = [];            // continuous circulation
+  let pulseBeads = [];       // synchronized wavefront beads
+  let dust = [];             // ambient "+" specks
+  let frameNo = 0;
+  let lastPulseTime = -Infinity;
+  const PULSE_PERIOD_MS = 5000;
+  let startTime = performance.now();
+
+  // ── Field math ────────────────────────────────────────────────────────────
+  // Two-monopole field. Source at +pole, sink at -pole.
+  function fieldAt(x, y) {
+    const dx1 = x - poleA.x, dy1 = y - poleA.y;
+    const r1s = dx1 * dx1 + dy1 * dy1 + 4;     // softening
+    const r1c = Math.pow(r1s, 1.5);
+    const dx2 = x - poleB.x, dy2 = y - poleB.y;
+    const r2s = dx2 * dx2 + dy2 * dy2 + 4;
+    const r2c = Math.pow(r2s, 1.5);
+    return {
+      fx:  dx1 / r1c - dx2 / r2c,
+      fy:  dy1 / r1c - dy2 / r2c
+    };
+  }
+
+  // Trace a streamline from a starting point. Integrate using RK2.
+  // Terminates when reaching sink, leaving the canvas, or step cap.
+  function traceStreamline(sx, sy) {
+    const pts = [];
+    let x = sx, y = sy;
+    pts.push({ x, y, len: 0 });
+    let totalLen = 0;
+    const stepArc = 3.5;        // visual arc length per step
+    const maxSteps = 4000;
+    const margin = Math.max(W, H) * 0.55;
+
+    for (let i = 0; i < maxSteps; i++) {
+      const f1 = fieldAt(x, y);
+      let m1 = Math.hypot(f1.fx, f1.fy);
+      if (m1 < 1e-9) break;
+      const ux = f1.fx / m1, uy = f1.fy / m1;
+      const mx = x + ux * stepArc * 0.5;
+      const my = y + uy * stepArc * 0.5;
+      const f2 = fieldAt(mx, my);
+      let m2 = Math.hypot(f2.fx, f2.fy);
+      if (m2 < 1e-9) break;
+      const nx = x + (f2.fx / m2) * stepArc;
+      const ny = y + (f2.fy / m2) * stepArc;
+      const dl = Math.hypot(nx - x, ny - y);
+      x = nx; y = ny;
+      totalLen += dl;
+      pts.push({ x, y, len: totalLen });
+
+      // Reached sink?
+      const dB = Math.hypot(x - poleB.x, y - poleB.y);
+      if (dB < 6) break;
+
+      // Off-screen escape (open field lines for the outer angles)
+      if (Math.abs(x - W * 0.5) > margin || Math.abs(y - H * 0.5) > margin) break;
+    }
+    return { points: pts, totalLen };
+  }
+
+  // ── Build the static topology once per resize ────────────────────────────
+  function buildTopology() {
+    const cx = W * 0.5, cy = H * 0.5;
+    const sep = Math.min(W, H) * 0.22;
+    poleA = { x: cx - sep, y: cy + sep * 0.18 };  // source (lime)
+    poleB = { x: cx + sep, y: cy - sep * 0.18 };  // sink (white)
+
+    streamlines = [];
+    const COUNT = 76;                              // dense enough to feel structural
+    const startR = 8;
+    for (let i = 0; i < COUNT; i++) {
+      const a = (i / COUNT) * Math.PI * 2;
+      const sx = poleA.x + Math.cos(a) * startR;
+      const sy = poleA.y + Math.sin(a) * startR;
+      const s = traceStreamline(sx, sy);
+      if (s.points.length > 4 && s.totalLen > 12) streamlines.push(s);
+    }
+
+    // Initial bead population — uniform along arc length
+    beads = [];
+    const BEADS_PER_LINE = 2.2;
+    for (let li = 0; li < streamlines.length; li++) {
+      const sl = streamlines[li];
+      const n = Math.max(1, Math.round(BEADS_PER_LINE));
+      for (let k = 0; k < n; k++) {
+        beads.push({
+          li,
+          t: Math.random(),                        // arc-length fraction
+          speed: 0.00018 + Math.random() * 0.00012 // fraction of total/ms
+        });
+      }
+    }
+
+    // Ambient dust — sparse
+    dust = [];
+    const dustCount = Math.round((W * H) / 28000);
+    let s = 0xC0DECAFE;
+    const r = () => (s = (s * 1664525 + 1013904223) >>> 0, (s & 0xffff) / 0xffff);
+    for (let i = 0; i < dustCount; i++) {
+      dust.push({
+        x: r() * W,
+        y: r() * H,
+        size: 0.6 + r() * 1.0,
+        a: 0.05 + r() * 0.12
+      });
+    }
+  }
+
+  // ── Bead → screen position via arc-length lookup ─────────────────────────
+  function posOnLine(sl, tFrac) {
+    const target = Math.max(0, Math.min(1, tFrac)) * sl.totalLen;
+    const pts = sl.points;
+    // Linear scan is fine for ~1k points
+    let lo = 0, hi = pts.length - 1;
+    while (lo + 1 < hi) {
+      const mid = (lo + hi) >> 1;
+      if (pts[mid].len <= target) lo = mid; else hi = mid;
+    }
+    const a = pts[lo], b = pts[hi];
+    const span = b.len - a.len || 1;
+    const k = (target - a.len) / span;
+    return { x: a.x + (b.x - a.x) * k, y: a.y + (b.y - a.y) * k };
+  }
+
+  // ── Render ───────────────────────────────────────────────────────────────
+  function drawPlus(x, y, s, color) {
+    ctx.strokeStyle = color;
+    ctx.lineWidth = Math.max(0.55, s * 0.45);
+    ctx.beginPath();
+    ctx.moveTo(x - s, y); ctx.lineTo(x + s, y);
+    ctx.moveTo(x, y - s); ctx.lineTo(x, y + s);
+    ctx.stroke();
+  }
+
+  function drawStaticLayers() {
+    // Streamlines — extremely faint, almost a substrate
+    ctx.lineWidth = 0.6;
+    ctx.lineCap = 'round';
+    for (let li = 0; li < streamlines.length; li++) {
+      const pts = streamlines[li].points;
+      // Two passes: a wider faint glow, a thin sharper core
+      ctx.strokeStyle = 'rgba(255,255,255,0.04)';
+      ctx.lineWidth = 1.4;
+      ctx.beginPath();
+      ctx.moveTo(pts[0].x, pts[0].y);
+      for (let i = 1; i < pts.length; i++) ctx.lineTo(pts[i].x, pts[i].y);
+      ctx.stroke();
+    }
+    ctx.lineWidth = 0.55;
+    for (let li = 0; li < streamlines.length; li++) {
+      const pts = streamlines[li].points;
+      ctx.strokeStyle = 'rgba(255,255,255,0.085)';
+      ctx.beginPath();
+      ctx.moveTo(pts[0].x, pts[0].y);
+      for (let i = 1; i < pts.length; i++) ctx.lineTo(pts[i].x, pts[i].y);
+      ctx.stroke();
+    }
+
+    // Ambient dust
+    for (let i = 0; i < dust.length; i++) {
+      const d = dust[i];
+      drawPlus(d.x, d.y, d.size, `rgba(255,255,255,${d.a.toFixed(3)})`);
+    }
+  }
+
+  // Static layer cache — streamlines + dust never change between resizes
+  let staticBuffer = null;
+  function rebuildStaticBuffer() {
+    staticBuffer = document.createElement('canvas');
+    staticBuffer.width = canvas.width;
+    staticBuffer.height = canvas.height;
+    const sctx = staticBuffer.getContext('2d');
+    sctx.setTransform(DPR, 0, 0, DPR, 0, 0);
+    sctx.fillStyle = '#000';
+    sctx.fillRect(0, 0, W, H);
+    // Re-issue draw against staticBuffer's context
+    const orig = ctx;
+    /* eslint-disable */ window._tmpCtx = ctx;
+    // Quick & clean: temporarily swap ctx pointer-style by drawing manually
+    sctx.lineCap = 'round';
+
+    // streamlines (wide glow)
+    sctx.lineWidth = 1.4;
+    sctx.strokeStyle = 'rgba(255,255,255,0.04)';
+    for (let li = 0; li < streamlines.length; li++) {
+      const pts = streamlines[li].points;
+      sctx.beginPath();
+      sctx.moveTo(pts[0].x, pts[0].y);
+      for (let i = 1; i < pts.length; i++) sctx.lineTo(pts[i].x, pts[i].y);
+      sctx.stroke();
+    }
+    // streamlines (sharp core)
+    sctx.lineWidth = 0.55;
+    sctx.strokeStyle = 'rgba(255,255,255,0.085)';
+    for (let li = 0; li < streamlines.length; li++) {
+      const pts = streamlines[li].points;
+      sctx.beginPath();
+      sctx.moveTo(pts[0].x, pts[0].y);
+      for (let i = 1; i < pts.length; i++) sctx.lineTo(pts[i].x, pts[i].y);
+      sctx.stroke();
+    }
+    // dust
+    for (let i = 0; i < dust.length; i++) {
+      const d = dust[i];
+      sctx.strokeStyle = `rgba(255,255,255,${d.a.toFixed(3)})`;
+      sctx.lineWidth = Math.max(0.55, d.size * 0.45);
+      sctx.beginPath();
+      sctx.moveTo(d.x - d.size, d.y); sctx.lineTo(d.x + d.size, d.y);
+      sctx.moveTo(d.x, d.y - d.size); sctx.lineTo(d.x, d.y + d.size);
+      sctx.stroke();
+    }
+  }
+
+  // ── Frame loop ───────────────────────────────────────────────────────────
+  let prevT = performance.now();
+  let running = true;
+
+  function frame(now) {
+    if (!running) return;
+    const dt = Math.min(48, now - prevT);  // ms; clamp for tab refocus
+    prevT = now;
+    frameNo++;
+
+    // Clear with the cached static substrate
+    ctx.setTransform(1, 0, 0, 1, 0, 0);
+    ctx.drawImage(staticBuffer, 0, 0);
+    ctx.setTransform(DPR, 0, 0, DPR, 0, 0);
+
+    // Synchronized pulse — emit on every line at the same instant
+    const elapsed = now - startTime;
+    if (elapsed - lastPulseTime >= PULSE_PERIOD_MS) {
+      lastPulseTime = elapsed;
+      for (let li = 0; li < streamlines.length; li++) {
+        pulseBeads.push({ li, t: 0, speed: 0.00045 + Math.random() * 0.00008, life: 1 });
+      }
+    }
+
+    // Persistent beads — additive lime cores
+    ctx.globalCompositeOperation = 'lighter';
+    for (let i = 0; i < beads.length; i++) {
+      const b = beads[i];
+      b.t += b.speed * dt;
+      if (b.t >= 1) {
+        // Rebirth at start of a (possibly different) line
+        b.li = (Math.random() * streamlines.length) | 0;
+        b.t = Math.random() * 0.05;
+        b.speed = 0.00018 + Math.random() * 0.00012;
+      }
+      const sl = streamlines[b.li];
+      const p = posOnLine(sl, b.t);
+      // soft glow
+      const g = ctx.createRadialGradient(p.x, p.y, 0, p.x, p.y, 5);
+      g.addColorStop(0, 'rgba(255,255,255,0.95)');
+      g.addColorStop(0.4, 'rgba(212,245,65,0.55)');
+      g.addColorStop(1, 'rgba(212,245,65,0)');
+      ctx.fillStyle = g;
+      ctx.fillRect(p.x - 5, p.y - 5, 10, 10);
+    }
+
+    // Pulse beads — brighter & larger; trail
+    for (let i = pulseBeads.length - 1; i >= 0; i--) {
+      const b = pulseBeads[i];
+      b.t += b.speed * dt;
+      if (b.t >= 1) { pulseBeads.splice(i, 1); continue; }
+      const sl = streamlines[b.li];
+      const p = posOnLine(sl, b.t);
+      // longer tail by sampling a few back-positions
+      for (let k = 0; k < 6; k++) {
+        const tt = Math.max(0, b.t - k * 0.012);
+        const pp = posOnLine(sl, tt);
+        const aa = (1 - k / 6) * 0.6;
+        const g = ctx.createRadialGradient(pp.x, pp.y, 0, pp.x, pp.y, 8 - k * 0.7);
+        g.addColorStop(0, `rgba(212,245,65,${aa.toFixed(3)})`);
+        g.addColorStop(1, 'rgba(212,245,65,0)');
+        ctx.fillStyle = g;
+        ctx.fillRect(pp.x - 9, pp.y - 9, 18, 18);
+      }
+      // sharp core
+      ctx.fillStyle = 'rgba(255,255,255,0.95)';
+      ctx.beginPath();
+      ctx.arc(p.x, p.y, 1.6, 0, Math.PI * 2);
+      ctx.fill();
+    }
+
+    // Source pole — bright lime corona
+    {
+      const r = 14 + Math.sin(elapsed * 0.001) * 1.2;
+      const g = ctx.createRadialGradient(poleA.x, poleA.y, 0, poleA.x, poleA.y, r * 4);
+      g.addColorStop(0,    'rgba(255,255,255,1)');
+      g.addColorStop(0.08, 'rgba(212,245,65,0.95)');
+      g.addColorStop(0.45, 'rgba(212,245,65,0.18)');
+      g.addColorStop(1,    'rgba(212,245,65,0)');
+      ctx.fillStyle = g;
+      ctx.fillRect(poleA.x - r * 4, poleA.y - r * 4, r * 8, r * 8);
+    }
+    // Sink pole — soft white halo
+    {
+      const r = 10;
+      const g = ctx.createRadialGradient(poleB.x, poleB.y, 0, poleB.x, poleB.y, r * 4);
+      g.addColorStop(0,    'rgba(255,255,255,0.85)');
+      g.addColorStop(0.25, 'rgba(255,255,255,0.30)');
+      g.addColorStop(1,    'rgba(255,255,255,0)');
+      ctx.fillStyle = g;
+      ctx.fillRect(poleB.x - r * 4, poleB.y - r * 4, r * 8, r * 8);
+    }
+
+    ctx.globalCompositeOperation = 'source-over';
+    requestAnimationFrame(frame);
+  }
+
+  // ── Lifecycle ────────────────────────────────────────────────────────────
+  function resize() {
+    DPR = Math.min(window.devicePixelRatio || 1, 2);
+    W = window.innerWidth;
+    H = window.innerHeight;
+    canvas.width = Math.floor(W * DPR);
+    canvas.height = Math.floor(H * DPR);
+    canvas.style.width = W + 'px';
+    canvas.style.height = H + 'px';
+    ctx.setTransform(DPR, 0, 0, DPR, 0, 0);
+    buildTopology();
+    rebuildStaticBuffer();
+  }
+
+  document.addEventListener('visibilitychange', () => {
+    running = !document.hidden;
+    if (running) { prevT = performance.now(); requestAnimationFrame(frame); }
+  });
+
+  const reduced = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+  window.addEventListener('resize', resize);
+  resize();
+  if (reduced) {
+    // Render once, no animation
+    frame(performance.now());
+    running = false;
+  } else {
+    requestAnimationFrame(frame);
+  }
+})();
+</script>
+</body>
+</html>
